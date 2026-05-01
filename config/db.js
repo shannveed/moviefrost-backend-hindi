@@ -12,6 +12,27 @@ if (!globalForMongoose.__MOVIEFROST_MONGOOSE_CACHE__) {
 
 const cache = globalForMongoose.__MOVIEFROST_MONGOOSE_CACHE__;
 
+const READY_STATE_LABELS = {
+  0: 'disconnected',
+  1: 'connected',
+  2: 'connecting',
+  3: 'disconnecting',
+};
+
+const getNumberEnv = (name, fallback) => {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+};
+
+export const getMongoStatus = () => ({
+  readyState: mongoose.connection.readyState,
+  state:
+    READY_STATE_LABELS[mongoose.connection.readyState] ||
+    String(mongoose.connection.readyState),
+  host: mongoose.connection.host || '',
+  name: mongoose.connection.name || '',
+});
+
 const printMongoHelp = (error) => {
   const msg = String(error?.message || error || '');
 
@@ -20,11 +41,21 @@ const printMongoHelp = (error) => {
   if (/bad auth|authentication failed/i.test(msg)) {
     console.error('');
     console.error('MongoDB auth checklist:');
-    console.error('1) Replace YOUR_PASSWORD in MONGO_URI with the real Atlas DB user password.');
+    console.error('1) Replace password in MONGO_URI with the real Atlas DB user password.');
     console.error('2) If password has @ # : / ? & characters, URL-encode the password.');
-    console.error('3) In Atlas > Database Access, confirm the username/password are correct.');
-    console.error('4) In Atlas > Network Access, allow your current IP or 0.0.0.0/0 for testing.');
-    console.error('5) Confirm the database user has access to the target database.');
+    console.error('3) Atlas > Database Access: confirm username/password.');
+    console.error('4) Atlas > Network Access: allow Vercel egress or 0.0.0.0/0 for testing.');
+    console.error('5) Confirm database user has access to the target database.');
+    console.error('');
+  }
+
+  if (/querysrv|enotfound|getaddrinfo|server selection|timed out|timeout/i.test(msg)) {
+    console.error('');
+    console.error('MongoDB network checklist:');
+    console.error('1) In Vercel backend project, add MONGO_URI in Environment Variables.');
+    console.error('2) In Atlas > Network Access, allow 0.0.0.0/0 for Vercel testing.');
+    console.error('3) Make sure the cluster is active and not paused.');
+    console.error('4) Use mongodb+srv:// URI copied from Atlas Connect dialog.');
     console.error('');
   }
 };
@@ -41,13 +72,27 @@ export const connectDB = async () => {
     throw err;
   }
 
-  if (cache.conn && mongoose.connection.readyState === 1) {
+  // Already connected
+  if (mongoose.connection.readyState === 1) {
+    if (!cache.conn) cache.conn = mongoose;
+
     return cache.conn;
   }
 
+  // Reuse active promise during cold starts / concurrent requests
   if (!cache.promise) {
     cache.promise = mongoose.connect(uri, {
-      serverSelectionTimeoutMS: 10000,
+      serverSelectionTimeoutMS: getNumberEnv(
+        'MONGO_SERVER_SELECTION_TIMEOUT_MS',
+        10000
+      ),
+      connectTimeoutMS: getNumberEnv('MONGO_CONNECT_TIMEOUT_MS', 10000),
+      socketTimeoutMS: getNumberEnv('MONGO_SOCKET_TIMEOUT_MS', 45000),
+      maxPoolSize: getNumberEnv('MONGO_MAX_POOL_SIZE', 10),
+      minPoolSize: 0,
+
+      // Helps Vercel/serverless environments that sometimes struggle with IPv6.
+      family: 4,
     });
   }
 
