@@ -10,9 +10,35 @@ import { generateToken } from '../middlewares/Auth.js';
 const AUTH_COOKIE_NAME = process.env.AUTH_COOKIE_NAME || 'mf_token';
 const AUTH_COOKIE_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 1 day
 
+const isLocalLikeUrl = (value = '') => {
+  const raw = String(value || '').trim();
+  if (!raw) return false;
+
+  try {
+    const url = new URL(raw);
+    return ['localhost', '127.0.0.1', '0.0.0.0'].includes(url.hostname);
+  } catch {
+    return /localhost|127\.0\.0\.1|0\.0\.0\.0/i.test(raw);
+  }
+};
+
+const shouldUseSecureAuthCookie = () => {
+  const forced = String(process.env.AUTH_COOKIE_SECURE || '')
+    .trim()
+    .toLowerCase();
+
+  if (forced === 'true') return true;
+  if (forced === 'false') return false;
+
+  const frontendUrl = String(process.env.PUBLIC_FRONTEND_URL || '').trim();
+  if (isLocalLikeUrl(frontendUrl)) return false;
+
+  return process.env.NODE_ENV === 'production';
+};
+
 const cookieOptions = () => ({
   httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
+  secure: shouldUseSecureAuthCookie(),
   sameSite: 'lax',
   path: '/',
   maxAge: AUTH_COOKIE_MAX_AGE_MS,
@@ -20,7 +46,7 @@ const cookieOptions = () => ({
 
 const clearCookieOptions = () => ({
   httpOnly: true,
-  secure: process.env.NODE_ENV === 'production',
+  secure: shouldUseSecureAuthCookie(),
   sameSite: 'lax',
   path: '/',
 });
