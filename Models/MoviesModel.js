@@ -7,6 +7,26 @@ const clampText = (value, max) =>
     .trim()
     .substring(0, max);
 
+/**
+ * IMPORTANT:
+ * MongoDB text indexes use "language" as the default language_override field.
+ * Because Movie documents have a normal "language" field like "Hindi",
+ * MongoDB can throw: "language override unsupported: Hindi".
+ *
+ * Fix:
+ * - Use default_language: "none"
+ * - Use a non-user field as language_override
+ */
+export const MOVIE_TEXT_INDEX_NAME = 'movie_text_search_v2';
+export const MOVIE_TEXT_LANGUAGE_OVERRIDE = '_mfTextLanguage';
+export const MOVIE_TEXT_INDEX_KEYS = {
+  name: 'text',
+  desc: 'text',
+  category: 'text',
+  language: 'text',
+  seoKeywords: 'text',
+};
+
 const reviewSchema = mongoose.Schema(
   {
     userName: { type: String, required: true },
@@ -38,7 +58,6 @@ const episodeSchema = mongoose.Schema(
   { timestamps: true }
 );
 
-/* ✅ NEW: FAQ schema (max 5 enforced in controller) */
 const faqSchema = mongoose.Schema(
   {
     question: { type: String, required: true, trim: true, maxlength: 200 },
@@ -83,7 +102,6 @@ const moviesSchema = mongoose.Schema(
     year: { type: Number, required: true },
     time: { type: Number, required: true },
 
-    /* ✅ NEW: trailer + FAQ (optional) */
     trailerUrl: { type: String, trim: true, default: '' },
     faqs: { type: [faqSchema], default: [] },
 
@@ -102,8 +120,7 @@ const moviesSchema = mongoose.Schema(
     },
     videoUrl3: { type: String, default: '' },
 
-    // ✅ NEW (Q1): optional extra server (used as "Server 1" when present)
-    // Works for BOTH Movie and WebSeries (WebSeries uses this as all-in-one episodes server).
+    // Optional extra server
     videoUrl7: { type: String, trim: true, default: '' },
 
     downloadUrl: { type: String, default: '' },
@@ -120,7 +137,7 @@ const moviesSchema = mongoose.Schema(
     numberOfReviews: { type: Number, required: true, default: 0 },
     reviews: [reviewSchema],
 
-    // Casts (TMDb synced)
+    // Casts
     casts: [
       {
         name: { type: String, required: true, trim: true },
@@ -132,13 +149,10 @@ const moviesSchema = mongoose.Schema(
     director: { type: String, trim: true, default: '' },
     directorSlug: { type: String, trim: true, default: '', index: true },
 
-    // External IDs
     imdbId: { type: String, trim: true, default: '', index: true },
 
-    // TMDb
     tmdbId: { type: Number, default: null, index: true },
 
-    // ✅ FIX: include '' to avoid crashing on existing docs / reset logic
     tmdbType: {
       type: String,
       enum: ['', 'movie', 'tv'],
@@ -149,7 +163,6 @@ const moviesSchema = mongoose.Schema(
 
     tmdbCreditsUpdatedAt: { type: Date, default: null, index: true },
 
-    // External ratings (OMDb)
     externalRatings: {
       imdb: {
         rating: { type: Number, default: null },
@@ -163,14 +176,12 @@ const moviesSchema = mongoose.Schema(
     },
     externalRatingsUpdatedAt: { type: Date, default: null, index: true },
 
-    // SEO
     seoTitle: { type: String, maxlength: 100, trim: true, default: '' },
     seoDescription: { type: String, maxlength: 300, trim: true, default: '' },
     seoKeywords: { type: String, trim: true, default: '' },
 
     viewCount: { type: Number, default: 0 },
 
-    // Flags
     latest: { type: Boolean, default: false },
     previousHit: { type: Boolean, default: false },
 
@@ -187,11 +198,8 @@ const moviesSchema = mongoose.Schema(
   { timestamps: true }
 );
 
-// ✅ Keep cast/director slugs synced + keep tmdbType safe
-// ✅ ALSO clamp legacy SEO/FAQ data so old bad records don't break saves/prerender
 moviesSchema.pre('validate', function (next) {
   try {
-    // casts slug
     if (Array.isArray(this.casts)) {
       for (const c of this.casts) {
         if (!c) continue;
@@ -202,17 +210,14 @@ moviesSchema.pre('validate', function (next) {
       }
     }
 
-    // director slug
     const d = String(this.director || '').trim();
     this.director = d;
     this.directorSlug = d ? slugify(d) : '';
 
-    // ✅ hard-clamp legacy SEO fields before validators run
     this.seoTitle = clampText(this.seoTitle, 100);
     this.seoDescription = clampText(this.seoDescription, 300);
     this.seoKeywords = String(this.seoKeywords ?? '').trim();
 
-    // ✅ defensive cleanup for legacy FAQ data
     if (Array.isArray(this.faqs)) {
       this.faqs = this.faqs
         .map((f) => ({
@@ -223,25 +228,25 @@ moviesSchema.pre('validate', function (next) {
         .slice(0, 5);
     }
 
-    // ✅ prevent enum validation crashes if DB contains junk
     const t = String(this.tmdbType ?? '').trim();
     if (!['', 'movie', 'tv'].includes(t)) {
       this.tmdbType = '';
     }
   } catch {
-    // ignore
+    // ignore cleanup failures
   }
 
   next();
 });
 
-// Text index
-moviesSchema.index({
-  name: 'text',
-  desc: 'text',
-  category: 'text',
-  language: 'text',
-  seoKeywords: 'text',
+/**
+ * Safe text index.
+ * Do NOT use MongoDB default language_override: "language".
+ */
+moviesSchema.index(MOVIE_TEXT_INDEX_KEYS, {
+  name: MOVIE_TEXT_INDEX_NAME,
+  default_language: 'none',
+  language_override: MOVIE_TEXT_LANGUAGE_OVERRIDE,
 });
 
 // Other indexes
@@ -250,8 +255,6 @@ moviesSchema.index({ browseBy: 1, createdAt: -1 });
 moviesSchema.index({ rate: -1 });
 moviesSchema.index({ viewCount: -1 });
 moviesSchema.index({ latest: -1, previousHit: 1, createdAt: -1 });
-
-// ✅ Keep only ONE declaration for each index (no duplicates)
 moviesSchema.index({ 'episodes.seasonNumber': 1 });
 
-export default mongoose.model('Movie', moviesSchema);
+export default mongoose.models.Movie || mongoose.model('Movie', moviesSchema);
