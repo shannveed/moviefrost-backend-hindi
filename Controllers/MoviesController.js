@@ -1,6 +1,13 @@
 // backend/Controllers/MoviesController.js
 import { MoviesData } from '../Data/MoviesData.js';
-import Movie from '../Models/MoviesModel.js';
+import Movie, { buildMovieDedupeKey } from '../Models/MoviesModel.js';
+import {
+  assertNoDuplicateMovie,
+  buildBulkDuplicateKey,
+  buildDuplicateMovieMessage,
+  findDuplicateMovie,
+} from '../utils/movieDedupe.js';
+
 import Categories from '../Models/CategoriesModel.js';
 import asyncHandler from 'express-async-handler';
 import mongoose from 'mongoose';
@@ -854,6 +861,7 @@ const updateMovie = asyncHandler(async (req, res) => {
     const originalType = movie.type;
     const originalName = movie.name;
     const originalYear = movie.year;
+    const originalLanguage = movie.language;
     const originalImdbId = String(movie.imdbId || '').trim();
 
     movie.type = type || movie.type;
@@ -902,6 +910,30 @@ const updateMovie = asyncHandler(async (req, res) => {
         rottenTomatoes: { rating: null, url: '' },
       };
     }
+
+    const duplicateIdentityChanged =
+      movie.type !== originalType ||
+      movie.name !== originalName ||
+      movie.year !== originalYear ||
+      movie.language !== originalLanguage;
+
+    if (duplicateIdentityChanged) {
+      await assertNoDuplicateMovie({
+        type: movie.type,
+        name: movie.name,
+        year: movie.year,
+        language: movie.language,
+        excludeId: movie._id,
+      });
+    }
+
+    movie.dedupeKey =
+      buildMovieDedupeKey({
+        type: movie.type,
+        name: movie.name,
+        year: movie.year,
+        language: movie.language,
+      }) || undefined;
 
     movie.seoTitle = seoTitle || movie.seoTitle;
     movie.seoDescription = seoDescription || movie.seoDescription;
@@ -1131,6 +1163,13 @@ const createMovie = asyncHandler(async (req, res) => {
     }
 
     const numericYear = Number(year) || undefined;
+
+    await assertNoDuplicateMovie({
+      type,
+      name,
+      year: numericYear || year,
+      language,
+    });
     const slug = await generateUniqueSlug(
       name,
       typeof numericYear === 'number' ? numericYear : undefined
@@ -1142,6 +1181,13 @@ const createMovie = asyncHandler(async (req, res) => {
       desc,
       image,
       titleImage,
+      dedupeKey:
+        buildMovieDedupeKey({
+          type,
+          name,
+          year: numericYear || year,
+          language,
+        }) || undefined,
       rate: rate || 0,
       numberOfReviews: numberOfReviews || 0,
       category,
@@ -1718,16 +1764,19 @@ const bulkCreateMovies = asyncHandler(async (req, res) => {
 
   const docsToInsert = [];
   const errors = [];
+  const seenInRequest = new Map();
 
   // Get max orderIndex
   const maxOrderDoc = await Movie.findOne({})
     .sort({ orderIndex: -1 })
     .select('orderIndex')
     .lean();
+
   let currentOrderIndex = maxOrderDoc?.orderIndex || 0;
 
   for (let i = 0; i < movies.length; i++) {
     const item = movies[i];
+
     try {
       const {
         type,
@@ -1745,8 +1794,8 @@ const bulkCreateMovies = asyncHandler(async (req, res) => {
         year,
         video,
         videoUrl2,
-        videoUrl3, // ✅ NEW (Q1)
-        videoUrl7, // ✅ NEW (Q1): optional extra server (Server 1 when present)
+        videoUrl3,
+        videoUrl7,
         episodes,
         casts,
         director,
@@ -1777,13 +1826,63 @@ const bulkCreateMovies = asyncHandler(async (req, res) => {
         throw new Error('Missing required fields');
       }
 
+      if (!['Movie', 'WebSeries'].includes(type)) {
+        throw new Error('Invalid type');
+      }
+
       if (latest && previousHit) {
         throw new Error('Movie cannot be both Latest and PreviousHit');
       }
 
+      const numericYear = Number(year) || undefined;
+      const finalYear = numericYear || year;
+
+      const dedupeKey = buildBulkDuplicateKey({
+        type,
+        name,
+        year: finalYear,
+        language,
+      });
+
+      if (!dedupeKey) {
+        throw new Error('Could not build duplicate-check key');
+      }
+
+      if (seenInRequest.has(dedupeKey)) {
+        errors.push({
+          index: i,
+          name: item?.name || null,
+          type: item?.type || null,
+          code: 'DUPLICATE_IN_REQUEST',
+          error: `Duplicate in uploaded JSON. Same as row ${seenInRequest.get(dedupeKey) + 1}.`,
+        });
+        continue;
+      }
+
+      seenInRequest.set(dedupeKey, i);
+
+      const existingDuplicate = await findDuplicateMovie({
+        type,
+        name,
+        year: finalYear,
+        language,
+      });
+
+      if (existingDuplicate) {
+        errors.push({
+          index: i,
+          name: item?.name || null,
+          type: item?.type || null,
+          code: 'DUPLICATE_IN_DATABASE',
+          existingId: existingDuplicate._id,
+          existingSlug: existingDuplicate.slug || null,
+          error: buildDuplicateMovieMessage(existingDuplicate),
+        });
+        continue;
+      }
+
       currentOrderIndex++;
 
-      const numericYear = Number(year) || undefined;
       const slug = await generateUniqueSlug(
         name,
         typeof numericYear === 'number' ? numericYear : undefined
@@ -1795,6 +1894,10 @@ const bulkCreateMovies = asyncHandler(async (req, res) => {
         desc,
         image,
         titleImage,
+
+        // ✅ Duplicate prevention
+        dedupeKey,
+
         rate: rate || 0,
         numberOfReviews: numberOfReviews || 0,
         category,
@@ -1802,7 +1905,7 @@ const bulkCreateMovies = asyncHandler(async (req, res) => {
         thumbnailInfo: thumbnailInfo || '',
         time,
         language,
-        year: numericYear || year,
+        year: finalYear,
         userId: req.user._id,
         casts: [],
         director: String(director || '').trim(),
@@ -1848,28 +1951,82 @@ const bulkCreateMovies = asyncHandler(async (req, res) => {
         index: i,
         name: item?.name || null,
         type: item?.type || null,
+        code: err?.code || 'VALIDATION_ERROR',
         error: err.message || 'Unknown error',
       });
     }
   }
 
   if (docsToInsert.length === 0) {
-    return res.status(400).json({
-      message: 'No valid movies to create. See "errors" for details.',
+    const onlyDuplicates =
+      errors.length > 0 &&
+      errors.every((e) =>
+        ['DUPLICATE_IN_REQUEST', 'DUPLICATE_IN_DATABASE'].includes(e.code)
+      );
+
+    return res.status(onlyDuplicates ? 200 : 400).json({
+      message: onlyDuplicates
+        ? 'No new movies created. All submitted items were duplicates and were skipped.'
+        : 'No valid movies to create. See "errors" for details.',
+      insertedCount: 0,
       errorsCount: errors.length,
       errors,
+      inserted: [],
     });
   }
 
-  const insertedMovies = await Movie.insertMany(docsToInsert, {
-    ordered: false,
-  });
+  let insertedMovies = [];
+
+  try {
+    insertedMovies = await Movie.insertMany(docsToInsert, {
+      ordered: false,
+    });
+  } catch (e) {
+    /**
+     * Race-safe duplicate handling:
+     * If two bulk requests run at the same time, unique dedupeKey may throw.
+     */
+    if (e?.writeErrors?.length) {
+      const duplicateWriteErrors = e.writeErrors.filter(
+        (w) => w?.code === 11000
+      );
+
+      if (duplicateWriteErrors.length) {
+        duplicateWriteErrors.forEach((w) => {
+          errors.push({
+            index: null,
+            name: w?.err?.op?.name || null,
+            type: w?.err?.op?.type || null,
+            code: 'DUPLICATE_WRITE_RACE',
+            error:
+              'Duplicate detected during insert. This item was skipped by unique index.',
+          });
+        });
+
+        insertedMovies = e?.insertedDocs || [];
+      } else {
+        throw e;
+      }
+    } else if (e?.code === 11000) {
+      errors.push({
+        index: null,
+        name: null,
+        type: null,
+        code: 'DUPLICATE_KEY',
+        error:
+          'Duplicate detected during insert. This item was skipped by unique index.',
+      });
+
+      insertedMovies = e?.insertedDocs || [];
+    } else {
+      throw e;
+    }
+  }
 
   try {
     const published = insertedMovies.filter((m) => m?.isPublished !== false);
 
     if (published.length) {
-      // 1) Revalidate list/home once (movie pages are new so no need to revalidate each)
       const { isFrontendRevalidateEnabled, revalidateFrontend } = await import(
         '../utils/frontendRevalidateService.js'
       );
@@ -1881,13 +2038,13 @@ const bulkCreateMovies = asyncHandler(async (req, res) => {
         });
       }
 
-      // 2) Ping IndexNow for all new pages (one request, chunked if needed)
       const urls = published.flatMap((m) => buildMoviePublicUrls(m));
       await notifyIndexNow(urls);
     }
   } catch (e) {
     console.warn('[indexing] bulkCreateMovies:', e?.message || e);
   }
+
   res.status(201).json({
     message: 'Bulk create executed',
     insertedCount: insertedMovies.length,
@@ -1896,6 +2053,7 @@ const bulkCreateMovies = asyncHandler(async (req, res) => {
     inserted: insertedMovies,
   });
 });
+
 
 /* ================================================================== */
 /*      ADMIN: drag‑and‑drop reorder within a single page             */

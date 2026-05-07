@@ -8,6 +8,36 @@ const clampText = (value, max) =>
     .substring(0, max);
 
 /**
+ * Duplicate prevention key:
+ * Same type + same normalized name + same year + same language = duplicate.
+ */
+export const normalizeMovieDedupeText = (value = '') =>
+  String(value ?? '')
+    .trim()
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+
+export const buildMovieDedupeKey = ({
+  type = '',
+  name = '',
+  year = '',
+  language = '',
+} = {}) => {
+  const t = normalizeMovieDedupeText(type);
+  const n = normalizeMovieDedupeText(name);
+  const l = normalizeMovieDedupeText(language);
+
+  const yearNumber = Number(year);
+  const y = Number.isFinite(yearNumber)
+    ? String(Math.trunc(yearNumber))
+    : normalizeMovieDedupeText(year);
+
+  if (!t || !n || !y || !l) return '';
+
+  return `${t}::${n}::${y}::${l}`;
+};
+
+/**
  * IMPORTANT:
  * MongoDB text indexes use "language" as the default language_override field.
  * Because Movie documents have a normal "language" field like "Hindi",
@@ -78,6 +108,20 @@ const moviesSchema = mongoose.Schema(
     },
 
     name: { type: String, required: true },
+
+    /**
+     * Used to prevent duplicate movies/webseries.
+     * Same type + name + year + language = same dedupeKey.
+     *
+     * sparse:true means old existing docs without dedupeKey won't break index creation.
+     */
+    dedupeKey: {
+      type: String,
+      trim: true,
+      unique: true,
+      sparse: true,
+      index: true,
+    },
 
     slug: {
       type: String,
@@ -200,6 +244,23 @@ const moviesSchema = mongoose.Schema(
 
 moviesSchema.pre('validate', function (next) {
   try {
+    this.name = String(this.name || '').trim();
+    this.type = String(this.type || '').trim();
+    this.language = String(this.language || '').trim();
+
+    const yearNumber = Number(this.year);
+    if (Number.isFinite(yearNumber)) {
+      this.year = Math.trunc(yearNumber);
+    }
+
+    this.dedupeKey =
+      buildMovieDedupeKey({
+        type: this.type,
+        name: this.name,
+        year: this.year,
+        language: this.language,
+      }) || undefined;
+
     if (Array.isArray(this.casts)) {
       for (const c of this.casts) {
         if (!c) continue;
@@ -248,6 +309,16 @@ moviesSchema.index(MOVIE_TEXT_INDEX_KEYS, {
   default_language: 'none',
   language_override: MOVIE_TEXT_LANGUAGE_OVERRIDE,
 });
+
+// Duplicate prevention index
+moviesSchema.index(
+  { dedupeKey: 1 },
+  {
+    unique: true,
+    sparse: true,
+    name: 'movie_dedupe_key_unique',
+  }
+);
 
 // Other indexes
 moviesSchema.index({ category: 1, createdAt: -1 });
