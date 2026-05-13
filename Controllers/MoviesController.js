@@ -1290,12 +1290,14 @@ const createMovie = asyncHandler(async (req, res) => {
   }
 });
 
-// PUBLIC: latest 15 (only published)
-const getLatestMovies = asyncHandler(async (_req, res) => {
+// PUBLIC: latest 40 (only published)
+const getLatestMovies = asyncHandler(async (req, res) => {
   try {
+    const limit = clampLimit(req.query.limit, 40, 40);
+
     const movies = await Movie.find(publicVisibilityFilter)
       .sort({ createdAt: -1, _id: -1 })
-      .limit(30)
+      .limit(limit)
       .select(PUBLIC_MOVIE_CARD_SELECT)
       .lean();
 
