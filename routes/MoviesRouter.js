@@ -23,95 +23,151 @@ import {
   createGuestMovieRating,
   getMovieRatings,
   getMyMovieRating,
-  deleteMovieRatingAdmin, // ✅ NEW
+  deleteMovieRatingAdmin,
 } from '../Controllers/RatingsController.js';
 
 import { syncTmdbCreditsAdmin } from '../Controllers/TmdbController.js';
 
+import { searchMoviesAndImdb } from '../Controllers/ImdbSearchController.js';
+import {
+  getImdbVirtualMovie,
+  resolveImdbMovie,
+} from '../Controllers/ImdbVirtualController.js';
+
 const router = express.Router();
+
+const searchAwarePublicMoviesList = (req, res, next) => {
+  const searchTerm = String(
+    req.query?.search || req.query?.query || req.query?.q || ''
+  ).trim();
+
+  if (searchTerm) {
+    return searchMoviesAndImdb(req, res, next);
+  }
+
+  return moviesController.getMovies(req, res, next);
+};
 
 // * PUBLIC ROUTES *
 router.post('/import', moviesController.importMovies);
-router.get('/', moviesController.getMovies);
 
-// Sitemaps (legacy API path; main sitemaps are served at backend root via server.js)
+// Local search first -> IMDb/OMDb fallback
+router.get('/', searchAwarePublicMoviesList);
+router.get('/search', searchMoviesAndImdb);
+
+// Sitemaps
 router.get('/sitemap.xml', generateSitemap);
 
 router.get('/rated/top', moviesController.getTopRatedMovies);
 router.get('/random/all', moviesController.getRandomMovies);
 router.get('/latest', moviesController.getLatestMovies);
 
-// Latest New (HomeScreen tab)
+// Latest New
 router.get('/latest-new', moviesController.getLatestNewMovies);
 
-// Banner (HomeScreen Banner.js)
+// Banner
 router.get('/banner', getBannerMovies);
 
 router.get('/browseBy-distinct', moviesController.getDistinctBrowseBy);
 
-// RELATED (must be before "/:id")
+// Related
 router.get('/related/:id', getRelatedMovies);
 
-// ADMIN READ ROUTES (include unpublished / drafts)
+// IMDb virtual pages
+router.post('/imdb/resolve', resolveImdbMovie);
+router.get('/imdb/virtual/:imdbId', getImdbVirtualMovie);
+
+// ADMIN READ ROUTES
 router.get('/admin', protect, admin, moviesController.getMoviesAdmin);
 
-// TMDb credits sync (casts/director overwrite)
+// TMDb credits sync stays for local cast images/director, but actors pages use IMDb IDs/name resolving.
 router.post('/admin/tmdb/sync-credits', protect, admin, syncTmdbCreditsAdmin);
 
 // Admin Latest New list
-router.get('/admin/latest-new', protect, admin, moviesController.getLatestNewMoviesAdmin);
+router.get(
+  '/admin/latest-new',
+  protect,
+  admin,
+  moviesController.getLatestNewMoviesAdmin
+);
 
 // Admin Banner list
 router.get('/admin/banner', protect, admin, getBannerMoviesAdmin);
 
-// ADMIN RELATED (must be before "/admin/:id")
+// ADMIN RELATED
 router.get('/admin/related/:id', protect, admin, getRelatedMoviesAdmin);
 
-// ADMIN: bulk lookup by exact names
+// ADMIN bulk lookup
 router.post('/admin/find-by-names', protect, admin, findMoviesByNamesAdmin);
 
 router.get('/admin/:id', protect, admin, moviesController.getMovieByIdAdmin);
 
 /* ============================================================
-   Ratings routes (WatchPage -> Rating collection)
+   Ratings routes
    ============================================================ */
 router.get('/:id/ratings', getMovieRatings);
 router.get('/:id/ratings/me', protect, getMyMovieRating);
 
-// guest rating (no login)
 router.post('/:id/ratings/guest', createGuestMovieRating);
-
-// logged-in rating
 router.post('/:id/ratings', protect, upsertMovieRating);
 
-// ✅ NEW: admin delete rating (keep BELOW /me and /guest to avoid route conflicts)
 router.delete('/:id/ratings/:ratingId', protect, admin, deleteMovieRatingAdmin);
 
-// PUBLIC single movie (only published)
+// PUBLIC single movie
 router.get('/:id', moviesController.getMovieById);
 
 // * PRIVATE ROUTES *
 router.post('/:id/reviews', protect, moviesController.createMovieReview);
-router.post('/:id/reviews/:reviewId/reply', protect, admin, moviesController.adminReplyReview);
+router.post(
+  '/:id/reviews/:reviewId/reply',
+  protect,
+  admin,
+  moviesController.adminReplyReview
+);
 
 // * ADMIN ROUTES *
 router.put('/bulk-exact', protect, admin, moviesController.bulkExactUpdateMovies);
 router.post('/bulk-delete', protect, admin, moviesController.bulkDeleteByName);
 router.post('/bulk', protect, admin, moviesController.bulkCreateMovies);
 
-// set/unset Latest New flag
-router.post('/admin/latest-new', protect, admin, moviesController.setLatestNewMovies);
+// Latest New
+router.post(
+  '/admin/latest-new',
+  protect,
+  admin,
+  moviesController.setLatestNewMovies
+);
 
-// reorder Latest New
-router.post('/admin/latest-new/reorder', protect, admin, reorderLatestNewMovies);
+router.post(
+  '/admin/latest-new/reorder',
+  protect,
+  admin,
+  reorderLatestNewMovies
+);
 
-// set/unset Banner flag
+// Banner
 router.post('/admin/banner', protect, admin, setBannerMovies);
 
-router.post('/admin/reorder-page', protect, admin, moviesController.reorderMoviesInPage);
-router.post('/admin/move-to-page', protect, admin, moviesController.moveMoviesToPage);
+router.post(
+  '/admin/reorder-page',
+  protect,
+  admin,
+  moviesController.reorderMoviesInPage
+);
 
-router.post('/admin/generate-slugs', protect, admin, moviesController.generateSlugsForAllMovies);
+router.post(
+  '/admin/move-to-page',
+  protect,
+  admin,
+  moviesController.moveMoviesToPage
+);
+
+router.post(
+  '/admin/generate-slugs',
+  protect,
+  admin,
+  moviesController.generateSlugsForAllMovies
+);
 
 router.put('/:id', protect, admin, moviesController.updateMovie);
 router.delete('/:id', protect, admin, moviesController.deleteMovie);
